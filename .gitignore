@@ -22,3 +22,5 @@ wheels/
 # Trained models (large binary files)
 models/*.joblib
 models/*.npz
+
+share-audio/
