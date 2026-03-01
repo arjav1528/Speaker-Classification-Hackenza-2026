@@ -13,3 +13,4 @@ torch
 transformers
 joblib
 audiomentations
+lightgbm

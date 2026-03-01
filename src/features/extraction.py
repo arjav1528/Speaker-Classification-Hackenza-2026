@@ -271,17 +271,10 @@ def pool_segment_features(
     weights: np.ndarray | None = None,
     voiced_ratios: np.ndarray | None = None,
     rms_energies: np.ndarray | None = None,
+    mode: str = "auto",
 ) -> np.ndarray:
     """
     Pool per-segment features into a single file-level feature vector.
-
-    Final vector = concat(
-        mean,              # (D,)
-        std,               # (D,)
-        weighted_mean,     # (D,)
-        weighted_std,      # (D,)
-        meta_features,     # (4,)  num_segments, mean/std voiced_ratio, mean rms
-    )
 
     Parameters
     ----------
@@ -289,11 +282,19 @@ def pool_segment_features(
     weights        : (n_segments,) normalised importance weights
     voiced_ratios  : (n_segments,) fraction of voiced frames per segment
     rms_energies   : (n_segments,) RMS energy per segment
+    mode           : "simple" → mean+std+meta (2×D+4)
+                     "full"   → mean+std+weighted_mean+weighted_std+meta (4×D+4)
+                     "auto"   → read from configs.config.POOLING_MODE
 
     Returns
     -------
-    pooled : (4*D + 4,) file-level feature vector
+    pooled : (2*D + 4,) or (4*D + 4,) file-level feature vector
     """
+    from configs.config import POOLING_MODE
+
+    if mode == "auto":
+        mode = POOLING_MODE
+
     if segment_matrix.ndim != 2 or segment_matrix.shape[0] < 1:
         raise ValueError(f"Expected 2-D matrix with >= 1 row, got {segment_matrix.shape}")
 
@@ -303,17 +304,6 @@ def pool_segment_features(
     feat_mean = np.mean(segment_matrix, axis=0)
     feat_std  = np.std(segment_matrix, axis=0)
 
-    # ── weighted pooling ──────────────────────────────────────────────────────────────
-    if weights is not None and len(weights) == n_seg:
-        w = weights[:, np.newaxis]  # (n_seg, 1)
-        w_mean = np.sum(w * segment_matrix, axis=0)
-        w_std  = np.sqrt(np.sum(w * (segment_matrix - w_mean) ** 2, axis=0) + EPS)
-    else:
-        # Fallback: uniform weights (equivalent to standard pooling)
-        logger.warning("No weights provided — using uniform weighting for weighted pool.")
-        w_mean = feat_mean.copy()
-        w_std  = feat_std.copy()
-
     # ── meta features ─────────────────────────────────────────────────────────────────
     meta_num_segments   = float(n_seg)
     meta_voiced_mean    = float(np.mean(voiced_ratios)) if voiced_ratios is not None else 0.0
@@ -322,12 +312,31 @@ def pool_segment_features(
 
     meta = np.array([meta_num_segments, meta_voiced_mean, meta_voiced_std, meta_rms_mean])
 
+    if mode == "simple":
+        pooled = np.concatenate([feat_mean, feat_std, meta])
+        pooled = np.nan_to_num(pooled, nan=0.0, posinf=0.0, neginf=0.0)
+        logger.debug(
+            "Pooled %d segments × %d features → %d (2×%d + 4 meta) [simple]",
+            n_seg, D, len(pooled), D,
+        )
+        return pooled
+
+    # ── weighted pooling (full mode) ──────────────────────────────────────────────────
+    if weights is not None and len(weights) == n_seg:
+        w = weights[:, np.newaxis]  # (n_seg, 1)
+        w_mean = np.sum(w * segment_matrix, axis=0)
+        w_std  = np.sqrt(np.sum(w * (segment_matrix - w_mean) ** 2, axis=0) + EPS)
+    else:
+        logger.warning("No weights provided — using uniform weighting for weighted pool.")
+        w_mean = feat_mean.copy()
+        w_std  = feat_std.copy()
+
     # ── concatenate ─────────────────────────────────────────────────────────────────────
     pooled = np.concatenate([feat_mean, feat_std, w_mean, w_std, meta])
     pooled = np.nan_to_num(pooled, nan=0.0, posinf=0.0, neginf=0.0)
 
     logger.debug(
-        "Pooled %d segments × %d features → %d (4×%d + 4 meta)",
+        "Pooled %d segments × %d features → %d (4×%d + 4 meta) [full]",
         n_seg, D, len(pooled), D,
     )
     return pooled
