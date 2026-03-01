@@ -112,14 +112,18 @@ class TrainPipeline:
                      len(audios), len(df), len(skipped))
 
         # ── 3. Augment minority class ────────────────────────────────────────
+        n_original = len(file_ids)
+        parent_indices = list(range(n_original))  # default: each sample is its own group
+
         if self.augment and self.n_augments > 0:
-            audios, labels = augment_minority(
+            audios, labels, parent_indices = augment_minority(
                 audios, labels, TARGET_SR, n_augments=self.n_augments
             )
-            # file_ids for augmented samples: mark as "aug_<original_id>"
-            n_original = len(file_ids)
+            # file_ids for augmented samples: mark as "aug_<parent_id>"
             n_augmented = len(audios) - n_original
-            file_ids.extend([f"aug_{i}" for i in range(n_augmented)])
+            for i in range(n_augmented):
+                parent_fid = file_ids[parent_indices[n_original + i]]
+                file_ids.append(f"aug_{parent_fid}_{i}")
 
         # ── 4. Feature extraction per file ───────────────────────────────────
         X_list = []
@@ -168,14 +172,30 @@ class TrainPipeline:
         X = np.vstack(X_list)
         y_str = np.array(y_list)
 
-        # ── 5. Encode labels ─────────────────────────────────────────────────
+        # ── 5. Build groups array (parent index for each valid sample) ───────
+        # Maps each sample to its original (non-augmented) parent index.
+        # This prevents augmented copies from leaking into validation folds.
+        # valid_parent maps valid_ids → parent group index in the *valid* set.
+        fid_to_parent_idx = {}  # parent file_id → index in valid set
+        groups = np.zeros(len(valid_ids), dtype=int)
+        for i, fid in enumerate(valid_ids):
+            # Look up the parent from the full file_ids → parent_indices mapping
+            full_idx = file_ids.index(fid) if fid in file_ids else i
+            parent_orig_idx = parent_indices[full_idx]
+            parent_fid = file_ids[parent_orig_idx]
+            if parent_fid not in fid_to_parent_idx:
+                fid_to_parent_idx[parent_fid] = len(fid_to_parent_idx)
+            groups[i] = fid_to_parent_idx[parent_fid]
+
+        # ── 6. Encode labels ─────────────────────────────────────────────────
         le = LabelEncoder()
         y = le.fit_transform(y_str)
 
-        logger.info("Feature matrix: %s | Labels: %s",
-                     X.shape, dict(zip(le.classes_, np.bincount(y))))
+        logger.info("Feature matrix: %s | Labels: %s | Groups: %d unique",
+                     X.shape, dict(zip(le.classes_, np.bincount(y))),
+                     len(fid_to_parent_idx))
 
-        return X, y, le, valid_ids
+        return X, y, le, valid_ids, groups
 
 
 class FeatureExtractor:
