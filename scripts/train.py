@@ -65,6 +65,7 @@ def main():
         build_track_a_pipeline,
         build_track_b_pipeline,
         train_and_evaluate,
+        train_and_evaluate_ensemble,
         save_model,
         optimize_threshold,
     )
@@ -182,6 +183,44 @@ def main():
     elif not use_embeddings and not args.track_a_only:
         logger.info("Track B skipped (embeddings disabled)")
 
+    # ── 3b. Ensemble (soft-vote A + B) ───────────────────────────────
+    run_ensemble = (
+        use_embeddings
+        and not args.track_a_only
+        and not args.track_b_only
+        and "Track A (LightGBM)" in all_results
+        and "Track B (LogReg+PCA)" in all_results
+    )
+    if run_ensemble:
+        print("-" * 60)
+        print("  ENSEMBLE: Soft-Vote (Track A + Track B)")
+        print("-" * 60)
+
+        pipe_a_ens = build_track_a_pipeline(n_features=X_track_a.shape[1])
+        n_comp = min(PCA_COMPONENTS, X_track_b.shape[1], n_samples - 1)
+        pipe_b_ens = build_track_b_pipeline(n_components=n_comp)
+
+        results_ens = train_and_evaluate_ensemble(
+            X, y,
+            pipeline_a=pipe_a_ens,
+            pipeline_b=pipe_b_ens,
+            pipeline_name="Ensemble (A+B)",
+            labels=labels_int,
+            groups=groups,
+            weight_a=0.5,
+        )
+        all_results["Ensemble (A+B)"] = results_ens
+
+        agg_e = results_ens["aggregate"]
+        print(f"\n  Ensemble Results ({agg_e['total_folds']} folds):")
+        print(f"    Balanced Accuracy : {agg_e['balanced_accuracy_mean']:.3f} ± {agg_e['balanced_accuracy_std']:.3f}")
+        print(f"    F1 (macro)        : {agg_e['f1_macro_mean']:.3f} ± {agg_e['f1_macro_std']:.3f}")
+        print(f"    MCC               : {agg_e['matthews_corrcoef_mean']:.3f} ± {agg_e['matthews_corrcoef_std']:.3f}")
+        print(f"    Threshold         : {agg_e['threshold_mean']:.3f} ± {agg_e['threshold_std']:.3f}")
+        if "roc_auc_mean" in agg_e:
+            print(f"    ROC AUC           : {agg_e['roc_auc_mean']:.3f} ± {agg_e['roc_auc_std']:.3f}")
+        print()
+
     # ── 4. Select best track and train final model ───────────────────────
     print("=" * 60)
     print("  COMPARISON SUMMARY")
@@ -222,15 +261,27 @@ def main():
     print("  Retraining best model on full training data…")
     print("-" * 60)
 
-    if "LightGBM" in best_name:
+    if "Ensemble" in best_name:
+        # For ensemble, retrain both component pipelines on full data
+        # and save them together via joblib
+        final_pipe_a = build_track_a_pipeline(n_features=X.shape[1])
+        n_comp = min(PCA_COMPONENTS, X.shape[1], n_samples - 1)
+        final_pipe_b = build_track_b_pipeline(n_components=n_comp)
+        final_pipe_a.fit(X, y)
+        final_pipe_b.fit(X, y)
+        # Wrap in a dict so predictor can use both
+        final_pipeline = {"pipe_a": final_pipe_a, "pipe_b": final_pipe_b,
+                          "weight_a": 0.5, "type": "ensemble"}
+        X_final = X
+    elif "LightGBM" in best_name:
         final_pipeline = build_track_a_pipeline(n_features=X.shape[1])
         X_final = X_track_a
+        final_pipeline.fit(X_final, y)
     else:
         n_comp = min(PCA_COMPONENTS, X.shape[1], n_samples - 1)
         final_pipeline = build_track_b_pipeline(n_components=n_comp)
         X_final = X_track_b
-
-    final_pipeline.fit(X_final, y)
+        final_pipeline.fit(X_final, y)
 
     # ── 6. Save ──────────────────────────────────────────────────────────
     model_dir = os.path.join("outputs", "models")

@@ -41,6 +41,7 @@ __all__ = [
     "get_all_pipelines",
     "optimize_threshold",
     "train_and_evaluate",
+    "train_and_evaluate_ensemble",
     "save_model",
     "load_model",
 ]
@@ -225,22 +226,167 @@ def train_and_evaluate(
     return {"per_fold": fold_metrics, "aggregate": agg}
 
 
+def train_and_evaluate_ensemble(
+    X: np.ndarray,
+    y: np.ndarray,
+    pipeline_a: Pipeline,
+    pipeline_b: Pipeline,
+    pipeline_name: str = "Ensemble (A+B)",
+    n_folds: int = N_FOLDS,
+    n_repeats: int = CV_REPEATS,
+    labels: list | None = None,
+    groups: np.ndarray | None = None,
+    weight_a: float = 0.5,
+) -> dict[str, Any]:
+    """
+    Soft-voting ensemble of Track A and Track B at the CV level.
+
+    For each fold, both pipelines are trained independently, their
+    predicted probabilities are blended (weighted average), a threshold
+    is calibrated on a held-out calibration portion of the training fold,
+    and the blended predictions are evaluated on the validation fold.
+
+    Parameters
+    ----------
+    weight_a : weight for Track A probabilities (Track B gets 1 − weight_a)
+    """
+    from sklearn.model_selection import StratifiedShuffleSplit
+    from src.utils.metrics import compute_metrics
+
+    rskf = RepeatedStratifiedKFold(
+        n_splits=n_folds, n_repeats=n_repeats, random_state=RANDOM_SEED
+    )
+
+    fold_metrics = []
+    fold_thresholds = []
+    weight_b = 1.0 - weight_a
+
+    def _get_splits(X_data, y_data):
+        """Yield (train_idx, val_idx) respecting groups if present."""
+        if groups is not None:
+            unique_groups = np.unique(groups)
+            group_to_indices = {g: np.where(groups == g)[0] for g in unique_groups}
+            rep_indices = np.array([group_to_indices[g][0] for g in unique_groups])
+            X_rep = X_data[rep_indices]
+            y_rep = y_data[rep_indices]
+
+            for train_grp_idx, val_grp_idx in rskf.split(X_rep, y_rep):
+                train_groups = unique_groups[train_grp_idx]
+                val_groups = unique_groups[val_grp_idx]
+                train_idx = np.concatenate([group_to_indices[g] for g in train_groups])
+                val_idx = np.array([group_to_indices[g][0] for g in val_groups])
+                yield train_idx, val_idx
+        else:
+            yield from rskf.split(X_data, y_data)
+
+    for fold_idx, (train_idx, val_idx) in enumerate(_get_splits(X, y)):
+        X_train, X_val = X[train_idx], X[val_idx]
+        y_train, y_val = y[train_idx], y[val_idx]
+
+        # Train both pipelines on full training fold (fixed threshold = 0.5)
+        clone_a = _clone_pipeline(pipeline_a)
+        clone_b = _clone_pipeline(pipeline_b)
+        clone_a.fit(X_train, y_train)
+        clone_b.fit(X_train, y_train)
+        best_thresh = 0.5
+
+        # Blend validation probabilities
+        try:
+            p_a_val = clone_a.predict_proba(X_val)[:, 1]
+            p_b_val = clone_b.predict_proba(X_val)[:, 1]
+            p_blend_val = weight_a * p_a_val + weight_b * p_b_val
+            y_pred_opt = (p_blend_val >= best_thresh).astype(int)
+            # Construct 2-column proba array for compute_metrics
+            y_proba = np.column_stack([1 - p_blend_val, p_blend_val])
+        except Exception:
+            y_pred_opt = clone_a.predict(X_val)
+            y_proba = None
+
+        m = compute_metrics(y_val, y_pred_opt, y_proba, labels=labels)
+        m["fold"] = fold_idx
+        m["threshold"] = best_thresh
+        fold_thresholds.append(best_thresh)
+        fold_metrics.append(m)
+
+        logger.info(
+            "%s | Fold %2d | balanced_acc=%.3f  f1_macro=%.3f  thresh=%.3f",
+            pipeline_name, fold_idx,
+            m["balanced_accuracy"], m["f1_macro"], best_thresh,
+        )
+
+    # ── aggregate ─────────────────────────────────────────────────────
+    scalar_keys = [
+        "accuracy", "balanced_accuracy", "precision_macro", "recall_macro",
+        "f1_macro", "f1_weighted", "cohen_kappa", "matthews_corrcoef",
+    ]
+    if fold_metrics[0].get("roc_auc") is not None:
+        scalar_keys.append("roc_auc")
+
+    agg = {}
+    for key in scalar_keys:
+        vals = [m[key] for m in fold_metrics if m.get(key) is not None]
+        if vals:
+            agg[f"{key}_mean"] = float(np.mean(vals))
+            agg[f"{key}_std"]  = float(np.std(vals))
+
+    agg["threshold_mean"] = float(np.mean(fold_thresholds))
+    agg["threshold_std"]  = float(np.std(fold_thresholds))
+    agg["n_folds"]        = n_folds
+    agg["n_repeats"]      = n_repeats
+    agg["total_folds"]    = len(fold_metrics)
+    agg["pipeline_name"]  = pipeline_name
+
+    return {"per_fold": fold_metrics, "aggregate": agg}
+
+
 def _run_single_fold(
     pipeline: Pipeline,
     X_train: np.ndarray, y_train: np.ndarray,
     X_val: np.ndarray, y_val: np.ndarray,
     pipeline_name: str, fold_idx: int,
     labels: list | None,
+    calibrate_threshold: bool = False,
 ) -> dict:
-    """Train on one fold and return metrics dict."""
+    """
+    Train on one fold and return metrics dict.
+
+    If ``calibrate_threshold`` is True, a 20 % stratified hold-out from
+    X_train is used to search for the optimal threshold.  Otherwise a
+    fixed threshold of 0.5 is used (recommended when the classifier
+    already uses class_weight='balanced').
+    """
+    from sklearn.model_selection import StratifiedShuffleSplit
     from src.utils.metrics import compute_metrics
 
     pipeline_clone = _clone_pipeline(pipeline)
+    best_thresh = 0.5  # default — works well with balanced class weights
+
+    if calibrate_threshold:
+        # ── split training fold into sub-train + calibration ─────────
+        sss = StratifiedShuffleSplit(
+            n_splits=1, test_size=0.20, random_state=RANDOM_SEED + fold_idx,
+        )
+        sub_train_idx, cal_idx = next(sss.split(X_train, y_train))
+        X_sub, y_sub = X_train[sub_train_idx], y_train[sub_train_idx]
+        X_cal, y_cal = X_train[cal_idx], y_train[cal_idx]
+
+        pipeline_clone.fit(X_sub, y_sub)
+
+        cal_proba = None
+        if hasattr(pipeline_clone, "predict_proba"):
+            try:
+                cal_proba = pipeline_clone.predict_proba(X_cal)
+            except Exception:
+                pass
+
+        if cal_proba is not None and cal_proba.ndim == 2 and cal_proba.shape[1] == 2:
+            best_thresh = optimize_threshold(y_cal, cal_proba[:, 1])
+
+    # ── train on the full training fold ──────────────────────────────
+    pipeline_clone = _clone_pipeline(pipeline)
     pipeline_clone.fit(X_train, y_train)
 
-    y_pred = pipeline_clone.predict(X_val)
     y_proba = None
-
     if hasattr(pipeline_clone, "predict_proba"):
         try:
             y_proba = pipeline_clone.predict_proba(X_val)
@@ -248,11 +394,9 @@ def _run_single_fold(
             pass
 
     if y_proba is not None and y_proba.ndim == 2 and y_proba.shape[1] == 2:
-        best_thresh = optimize_threshold(y_val, y_proba[:, 1])
         y_pred_opt = (y_proba[:, 1] >= best_thresh).astype(int)
     else:
-        y_pred_opt = y_pred
-        best_thresh = 0.5
+        y_pred_opt = pipeline_clone.predict(X_val)
 
     m = compute_metrics(y_val, y_pred_opt, y_proba, labels=labels)
     m["fold"] = fold_idx
@@ -278,15 +422,23 @@ def _clone_pipeline(pipeline: Pipeline) -> Pipeline:
 # ── Model persistence ─────────────────────────────────────────────────────────
 
 def save_model(
-    pipeline: Pipeline,
+    pipeline: Pipeline | dict,
     label_encoder: LabelEncoder,
     model_dir: str,
     metrics: dict | None = None,
     threshold: float = 0.5,
     feature_info: dict | None = None,
 ) -> None:
-    """Save trained pipeline, label encoder, metrics, and metadata."""
+    """Save trained pipeline (or ensemble dict), label encoder, metrics, and metadata."""
     os.makedirs(model_dir, exist_ok=True)
+
+    if isinstance(pipeline, dict) and pipeline.get("type") == "ensemble":
+        # Save ensemble as a single joblib containing the dict of pipelines
+        joblib.dump(pipeline, os.path.join(model_dir, "ensemble.joblib"))
+        # Also save components individually for easier inspection
+        joblib.dump(pipeline["pipe_a"], os.path.join(model_dir, "pipeline.joblib"))
+    else:
+        joblib.dump(pipeline, os.path.join(model_dir, "pipeline.joblib"))
 
     joblib.dump(pipeline, os.path.join(model_dir, "pipeline.joblib"))
     joblib.dump(label_encoder, os.path.join(model_dir, "label_encoder.joblib"))
