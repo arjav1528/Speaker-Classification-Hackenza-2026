@@ -1,244 +1,268 @@
 # Speaker Classification — Native vs Non-Native
 
-A machine learning pipeline that classifies speakers as **native** or **non-native** English speakers from audio recordings. Built for **Hackenza 2026**.
+A machine learning pipeline that classifies speakers as **Native** or **Non-Native** English speakers from audio recordings. Built for **Hackenza 2026**.
 
-## Pipeline Overview
+---
+
+## Overview
+
+The pipeline uses a **dual-track baseline** approach:
+
+- **Track A**: Handcrafted acoustic features (109-dim per segment) → Mutual Information feature selection → LightGBM
+- **Track B**: wav2vec2 embeddings (768-dim) → PCA → Logistic Regression
+- **Ensemble**: Soft-vote combining Track A + Track B
+
+Both tracks are evaluated via **Repeated Stratified 5-Fold CV** (3 repeats = 15 folds). The best model (by balanced accuracy) is retrained on full data and saved for inference.
+
+---
+
+## Pipeline Flow
 
 ```
-Raw Audio → Standardize → VAD → Segment → Features → Pool → Classify
+Raw Audio → Preprocess (VAD, standardize) → Segment (3s windows, 1s overlap) → Features → Pool → Classify
 ```
 
 | Stage | Module | Description |
 |-------|--------|-------------|
-| **Standardize** | `Stdaudio.py` | Mono conversion, resampling to 16 kHz, DC removal, silence trimming, high-pass filter, RMS normalization |
-| **VAD** | `VAD.py` | WebRTC voice activity detection — strips non-speech while preserving prosodic gaps |
-| **Segment** | `Segment.py` | Splits audio into fixed-length buckets (default 3s) with optional overlap |
-| **Features** | `Features.py` | Extracts 109-dim feature vector per segment (see below) |
-| **Pool** | `Features.py` | Aggregates segment features → 218-dim file-level vector (mean + std) |
-| **Classify** | `Classifier.py` | SVM + Random Forest + GBM with GridSearchCV, soft-voting ensemble |
+| **Preprocess** | `src/preprocessing/audio.py` | Mono, 16 kHz, DC removal, high-pass filter, RMS normalization |
+| **VAD** | `src/preprocessing/vad.py` | WebRTC voice activity detection — strips non-speech |
+| **Segment** | `src/preprocessing/segment.py` | 3s buckets with 1s overlap (2s hop) |
+| **Features** | `src/features/extraction.py` | 109 handcrafted + optional 768 wav2vec2 per segment |
+| **Pool** | `src/features/extraction.py` | mean + std + meta → file-level vector |
+| **Classify** | `src/models/classifier.py` | Track A (LightGBM), Track B (LogReg), or Ensemble |
+
+---
 
 ## Quick Start
 
+### Prerequisites
+
+- **Python 3.12+**
+- [uv](https://docs.astral.sh/uv/) (recommended) or pip
+
+### Install
+
 ```bash
-# 1. Clone & install
+# Clone the repo
 git clone <repo-url> && cd Speaker-Classification-Hackenza-2026
-uv sync                    # or: pip install -e .
 
-# 2. Preprocess raw audio files
-python main.py preprocess --data-dir share-audio/data/raw --output-dir share-audio/data/wav
+# Install with uv (recommended)
+uv sync
 
-# 3. Train the classifier
-python main.py train --data-dir share-audio/data/wav --model-dir models
-
-# 4. Predict on a new audio file
-python main.py predict --audio-path path/to/audio.wav --model-dir models
-
-# 5. Run the full accuracy evaluation
-python test_accuracy.py
+# Or with pip
+pip install -e .
 ```
 
-## Features Extracted (109 dimensions per segment)
+### Train
+
+```bash
+python scripts/train.py
+```
+
+### Predict
+
+```bash
+python scripts/predict.py                                    # Test set
+python scripts/predict.py path/to/audio.wav                  # Single file
+python scripts/predict.py --model-dir outputs/models/ *.wav  # Multiple files
+```
+
+---
+
+## Project Structure
+
+```
+Speaker-Classification-Hackenza-2026/
+├── src/
+│   ├── pipeline.py              # TrainPipeline, FeatureExtractor
+│   ├── preprocessing/
+│   │   ├── audio.py             # preprocess_in_memory, standardize_audio
+│   │   ├── vad.py               # WebRTC VAD
+│   │   ├── segment.py           # segment_into_buckets
+│   │   └── augment.py           # minority-class augmentation
+│   ├── features/
+│   │   ├── extraction.py        # 109-dim handcrafted features
+│   │   └── embeddings.py        # wav2vec2 embeddings
+│   ├── models/
+│   │   └── classifier.py        # Track A/B pipelines, ensemble, save/load
+│   ├── inference/
+│   │   └── predictor.py         # Predictor class for inference
+│   └── utils/
+│       ├── io.py                # load_train_csv, resolve_audio_path
+│       └── metrics.py           # evaluation metrics
+├── scripts/
+│   ├── train.py                 # Train dual-track, select best, save model
+│   ├── predict.py               # Run predictions
+│   ├── extract_features.py      # Extract and cache features to .npz
+│   └── run.py                   # Full pipeline entrypoint
+├── configs/
+│   └── config.py                # TARGET_SR, BUCKET_DURATION, etc.
+├── share-data/
+│   ├── wav_converted.csv        # Training: dp_id, audio_url, nativity_status
+│   └── test/
+│       ├── test_wav_converted.csv
+│       └── wav/                 # Test audio files
+├── outputs/
+│   ├── models/                  # Saved pipeline, label encoder, metrics
+│   ├── results/                 # Predictions, metrics.json, results_summary.csv
+│   └── features/                # Cached train_features.npz
+├── tests/
+│   └── test_pipeline.py
+├── pyproject.toml
+└── README.md
+```
+
+---
+
+## Data Format
+
+### Training CSV (`share-data/wav_converted.csv`)
+
+| Column | Description |
+|--------|-------------|
+| `dp_id` | Unique sample ID |
+| `audio_url` | Relative path (e.g. `data/wav/716.wav`) |
+| `nativity_status` | `Native` or `Non-Native` |
+| `language` | e.g. `Arabic_QA`, `Arabic_SA` |
+
+Audio paths are resolved from `share-data/`; files may live under `Native/` or `Non-Native/` subdirs.
+
+### Test CSV (`share-data/test/test_wav_converted.csv`)
+
+Same structure with `nativity_status` as `-` (unlabeled). Predictions are written to `outputs/results/test_predictions.csv`.
+
+---
+
+## Usage
+
+### Train
+
+```bash
+python scripts/train.py
+python scripts/train.py --no-augment           # Disable minority augmentation
+python scripts/train.py --no-embeddings        # Track A only (no wav2vec2)
+python scripts/train.py --track-a-only         # Only LightGBM
+python scripts/train.py --track-b-only         # Only wav2vec2 + LogReg
+python scripts/train.py --from-cache outputs/features/train_features.npz
+```
+
+**Output** (saved to `outputs/`):
+
+- `models/`: `pipeline.joblib`, `label_encoder.joblib`, `metrics.json`, etc.
+- `results/`: `results_summary.csv`, `metrics.json`
+
+### Predict
+
+```bash
+python scripts/predict.py                                    # Predict test set
+python scripts/predict.py path/to/audio.wav                  # Single file
+python scripts/predict.py --model-dir outputs/models/ *.wav  # Multiple files
+python scripts/predict.py --no-embeddings                    # Match model trained without embeddings
+python scripts/predict.py --output my_predictions.csv        # Custom output path
+```
+
+### Extract Features (Cache)
+
+```bash
+python scripts/extract_features.py
+python scripts/extract_features.py --no-embeddings --output outputs/features/train_features.npz
+```
+
+Cached `.npz` can be passed to `train.py --from-cache` to skip re-extraction.
+
+### Full Pipeline
+
+```bash
+python scripts/run.py
+python scripts/run.py --preprocess-only
+```
+
+---
+
+## Features
+
+### Handcrafted (109-dim per segment)
 
 | Feature Group | Count | Source |
-|---|---|---|
+|---------------|-------|--------|
 | MFCCs + Δ + ΔΔ (mean, std) | 78 | librosa |
 | Spectral centroid, bandwidth, rolloff | 6 | librosa |
 | Zero-crossing rate | 2 | librosa |
 | RMS energy | 2 | librosa |
 | Pitch (F0) statistics + contour shape | 7 | Praat (parselmouth) |
-| Jitter & Shimmer (voice quality) | 4 | Praat |
-| Formant statistics (F1–F3 means, stds, ranges) | 9 | Praat |
-| Speaking rate (onsets/sec) | 1 | librosa |
+| Jitter & Shimmer | 4 | Praat |
+| Formant stats (F1–F3) | 9 | Praat |
+| Speaking rate | 1 | librosa |
 
-## Setup
+### Pooling (per file)
 
-### Prerequisites
+- **Simple**: mean + std + 4 meta → `2×109 + 4 = 222` dims (handcrafted only)
+- **Full**: mean + std + weighted_mean + weighted_std + 4 meta (with segment weights)
 
-- Python ≥ 3.12
-- [uv](https://docs.astral.sh/uv/) (recommended) or pip
+With wav2vec2: per-segment dim = `109 + 768 = 877`, pooled to file-level accordingly.
 
-### Install dependencies
+---
 
-```bash
-# Using uv (recommended)
-uv sync
+## Configuration
 
-# Or using pip
-pip install -e .
-```
+Key constants in `configs/config.py`:
 
-### Project structure
+| Constant | Default | Description |
+|----------|---------|-------------|
+| `TARGET_SR` | 16000 | Sample rate (Hz) |
+| `BUCKET_DURATION` | 3.0 | Segment length (seconds) |
+| `OVERLAP_SEC` | 1.0 | Overlap between segments |
+| `N_AUGMENTS` | 3 | Augmented copies per minority sample |
+| `FEATURE_SELECT_K` | 100 | Top-K features (MI SelectKBest) |
+| `PCA_COMPONENTS` | 50 | PCA dims for Track B |
+| `USE_EMBEDDINGS` | True | Include wav2vec2 embeddings |
+| `EMBEDDING_MODEL` | `facebook/wav2vec2-base` | Pretrained model |
 
-```
-├── main.py              # CLI entry point (preprocess / train / predict)
-├── test_accuracy.py     # Full accuracy evaluation pipeline
-├── config.py            # Shared constants (TARGET_SR, RANDOM_SEED, etc.)
-├── Stdaudio.py          # Audio standardization + in-memory preprocessing
-├── VAD.py               # Voice activity detection
-├── Segment.py           # Audio segmentation
-├── Features.py          # Feature extraction (MFCCs, pitch, formants, etc.)
-├── Classifier.py        # Model training & prediction
-├── tests/               # Unit tests
-│   └── test_pipeline.py
-├── results/             # Accuracy reports, plots, predictions (auto-generated)
-├── share-audio/         # Training & test data
-│   ├── wav_converted.csv
-│   ├── data/wav/        # Preprocessed training audio
-│   └── test/            # Unlabeled test audio
-└── pyproject.toml       # Project config & dependencies
-```
+---
 
-## Usage
+## Evaluation
 
-### 1. Preprocess raw audio
+- **Repeated Stratified 5-Fold CV** (3 repeats)
+- **Metrics**: Balanced Accuracy, F1 Macro, MCC, ROC AUC
+- **Threshold optimization** per fold for better recall/precision trade-off
+- **Group-aware splits** so augmented copies do not leak into validation
 
-Standardize all audio files (resample to 16 kHz, normalize, filter):
+Best model is selected by **balanced accuracy**.
 
-```bash
-python main.py preprocess --data-dir data/raw --output-dir data/processed
-```
+---
 
-**Expected data layout:**
-```
-data/raw/
-├── native/
-│   ├── speaker01.wav
-│   ├── speaker02.mp3
-│   └── ...
-└── non_native/
-    ├── speaker10.wav
-    ├── speaker11.flac
-    └── ...
-```
+## Anti-Overfitting
 
-Supported formats: `.wav`, `.mp3`, `.flac`, `.ogg`, `.m4a`, `.aac`, `.wma`
+- Mutual information feature selection (Track A)
+- PCA for embeddings (Track B)
+- Stratified CV with group awareness (augmented samples)
+- Balanced class weights
+- Soft-voting ensemble (no extra learnable parameters)
 
-### 2. Train the classifier
+---
 
-```bash
-python main.py train --data-dir data/processed --model-dir models
-```
+## Dependencies
 
-This runs the full pipeline: **VAD → Segment → Extract Features → Pool → Train (SVM + RF + GBM + Ensemble)** with 5-fold stratified cross-validation and hyperparameter tuning via GridSearchCV.
+| Package | Purpose |
+|---------|---------|
+| librosa | MFCCs, spectral features |
+| praat-parselmouth | Pitch, formants, jitter/shimmer |
+| scikit-learn | Pipelines, CV, PCA |
+| lightgbm | Track A classifier |
+| webrtcvad / webrtcvad-wheels | Voice activity detection |
+| torch, transformers | wav2vec2 embeddings |
+| audiomentations | Minority-class augmentation |
+| soundfile, scipy, numpy | Audio I/O and filtering |
 
-**Output artifacts** (saved to `models/`):
-- `pipeline.joblib` — best individual model pipeline
-- `ensemble.joblib` — soft-voting ensemble
-- `label_encoder.joblib` — label mapping
-- `metrics.json` — cross-validated accuracy, confusion matrices, per-class reports
-- `feature_info.npz` — mutual information feature scores
+---
 
-### 3. Predict on a new audio file
-
-```bash
-python main.py predict --audio-path path/to/audio.wav --model-dir models
-```
-
-**Example output:**
-```
-══════════════════════════════════════════════════
-  File:          test_speaker.wav
-  Segments used: 4
-  Prediction:    native
-  Confidence:    87.3%
-  Probabilities: {'native': 0.873, 'non_native': 0.127}
-══════════════════════════════════════════════════
-```
-
-### 4. Run the full accuracy evaluation
-
-```bash
-python test_accuracy.py
-```
-
-This evaluates **8 classifiers** (SVM RBF, SVM Linear, Random Forest, Gradient Boosting, KNN, MLP, Logistic Regression, AdaBoost) plus a soft-voting ensemble using:
-
-- **80/20 stratified holdout split** — primary accuracy estimate
-- **5-fold stratified cross-validation** — more robust generalization estimate
-- **Comprehensive metrics** — see below
-
-**Options:**
-```bash
-python test_accuracy.py --skip-plots           # Skip generating charts
-python test_accuracy.py --models svm rf mlp    # Only evaluate specific models
-```
-
-**Output** (saved to `results/`):
-- `results_summary.csv` — model comparison table
-- `metrics.json` — all metrics as JSON
-- `test_predictions.csv` — predictions for unlabeled test set
-- `model_comparison.png` — bar chart comparing all models
-- `cm_*.png` — confusion matrices per model
-- `best_model_radar.png` — radar chart of best model's metrics
-
-### Metrics & Class Bias Detection
-
-The evaluation reports these metrics to prevent a model from gaming accuracy by always predicting the majority class:
-
-| Metric | What it catches |
-|---|---|
-| **Accuracy** | Overall correctness |
-| **Balanced Accuracy** | Average per-class recall — immune to class imbalance tricks |
-| **Per-class Precision / Recall / F1** | Performance on each class separately |
-| **Min Class Recall** | Worst class recall — 0 means a class is completely ignored |
-| **ROC AUC** | Discriminative ability; 0.5 = random guessing |
-| **Cohen's Kappa** | Agreement beyond chance |
-| **Matthews Correlation Coefficient** | Best single metric for imbalanced datasets |
-| **EER** | Equal error rate (speaker verification standard) |
-| **Log Loss** | Penalizes confident wrong predictions |
-
-**Automatic warnings:**
-- **⚠ CLASS BIAS** — fires if any class gets <5% of predictions but >10% of the data
-- **⚠ Accuracy vs Balanced Accuracy gap** — fires if gap >0.05 (imbalance exploitation)
-- **⚠ flag** on per-class rows where recall < 0.30
-
-Best model is selected by **balanced accuracy** (not raw accuracy), so a model must perform well on *both* classes.
-
-## Anti-Overfitting Measures
-
-- **Feature selection** via mutual information (218 → 80 features) inside each CV fold
-- **StandardScaler** inside the pipeline — no leakage
-- **Stratified k-fold CV** — honest evaluation, no same-speaker contamination
-- **GridSearchCV** — automated hyperparameter tuning
-- **Balanced class weights** — handles class imbalance
-- **Soft-voting ensemble** — zero extra learnable parameters (unlike stacking)
-- **Per-file pooling** — one label per file, segments from the same file never split across train/test
-
-## Running Tests
+## Tests
 
 ```bash
 python -m pytest tests/ -v
 ```
 
-## Configuration
-
-All shared constants live in `config.py`:
-
-| Constant | Default | Description |
-|---|---|---|
-| `TARGET_SR` | 16000 | Sample rate (Hz) |
-| `BUCKET_DURATION` | 3.0 | Segment length (seconds) |
-| `MIN_BUCKET_RATIO` | 0.5 | Keep final segment if ≥ 50% of full bucket |
-| `RANDOM_SEED` | 42 | Reproducibility seed |
-| `N_FOLDS` | 5 | Stratified CV folds |
-| `MAX_FEATURES` | 80 | Top-K features (mutual information) |
-| `FEATURE_DIM` | 109 | Per-segment feature vector length |
-
-## Dependencies
-
-| Package | Purpose |
-|---|---|
-| librosa | Audio loading, MFCCs, spectral features |
-| praat-parselmouth | Pitch, formants, jitter/shimmer via Praat |
-| scikit-learn | SVM, Random Forest, GBM, pipelines, CV |
-| webrtcvad-wheels | WebRTC voice activity detection |
-| scipy | High-pass filtering (Butterworth) |
-| soundfile | WAV file I/O |
-| numpy | Numerical operations |
-| joblib | Model serialization |
-| pandas | Data loading & result tables |
-| seaborn | Visualization (confusion matrices) |
-| matplotlib | Charts & plots |
+---
 
 ## License
 
