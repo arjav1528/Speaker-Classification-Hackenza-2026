@@ -7,7 +7,6 @@ requires-python = ">=3.12"
 dependencies = [
     "librosa>=0.11.0",
     "matplotlib>=3.10.8",
-    "moviepy>=2.2.1",
     "numpy>=2.4.2",
     "praat-parselmouth>=0.4.7",
     "scikit-learn>=1.8.0",
@@ -15,4 +14,9 @@ dependencies = [
     "soundfile>=0.13.1",
     "webrtcvad-wheels>=2.0.14",
     "joblib>=1.4.0",
+    "seaborn>=0.13.0",
+    "pandas>=2.0.0",
+    "torch>=2.0.0",
+    "transformers>=4.30.0",
+    "audiomentations>=0.36.0",
 ]

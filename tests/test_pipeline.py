@@ -6,9 +6,11 @@ Run with:  python -m pytest tests/ -v
 import numpy as np
 import pytest
 
+from config import TARGET_SR
+
 # ── fixtures ──────────────────────────────────────────────────────────────────
 
-SR = 16_000  # standard sample rate used throughout the project
+SR = TARGET_SR  # standard sample rate used throughout the project
 
 
 @pytest.fixture

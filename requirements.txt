@@ -1,0 +1,15 @@
+# Speaker Classification — Dependencies
+numpy
+scipy
+librosa
+soundfile
+scikit-learn
+pandas
+matplotlib
+seaborn
+parselmouth
+webrtcvad
+torch
+transformers
+joblib
+audiomentations
