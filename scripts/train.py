@@ -86,6 +86,7 @@ def main():
         from sklearn.preprocessing import LabelEncoder
         le = LabelEncoder()
         y = le.fit_transform(y_str)
+        groups = None  # no group info from cache
 
         logger.info("Loaded: X=%s, classes=%s", X.shape,
                      dict(zip(le.classes_, np.bincount(y))))
@@ -95,7 +96,7 @@ def main():
             use_embeddings=use_embeddings,
             pooling_mode="simple",
         )
-        X, y, le, file_ids = pipe.run()
+        X, y, le, file_ids, groups = pipe.run()
 
     n_samples, n_features = X.shape
     labels_int = list(range(len(le.classes_)))
@@ -139,6 +140,7 @@ def main():
             X_track_a, y, pipe_a,
             pipeline_name="Track A (LightGBM)",
             labels=labels_int,
+            groups=groups,
         )
         all_results["Track A (LightGBM)"] = results_a
 
@@ -164,6 +166,7 @@ def main():
             X_track_b, y, pipe_b,
             pipeline_name="Track B (LogReg+PCA)",
             labels=labels_int,
+            groups=groups,
         )
         all_results["Track B (LogReg+PCA)"] = results_b
 

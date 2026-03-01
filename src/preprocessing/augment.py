@@ -71,8 +71,10 @@ def augment_minority(
 
     Returns
     -------
-    (audios_out, labels_out)
+    (audios_out, labels_out, parent_indices)
         Original samples + augmented minority samples appended.
+        parent_indices[i] = index of the original sample that sample i came from.
+        For originals, parent_indices[i] == i.
     """
     if seed is not None:
         np.random.seed(seed)
@@ -80,7 +82,7 @@ def augment_minority(
     counts = Counter(labels)
     if len(counts) < 2:
         logger.warning("Only one class present — skipping augmentation.")
-        return audios, labels
+        return audios, labels, list(range(len(audios)))
 
     minority_class = min(counts, key=counts.get)
     majority_class = max(counts, key=counts.get)
@@ -98,15 +100,17 @@ def augment_minority(
     # Start with copies of all originals
     audios_out = list(audios)
     labels_out = list(labels)
+    parent_indices = list(range(len(audios)))  # originals map to themselves
 
     n_generated = 0
-    for audio, label in zip(audios, labels):
+    for orig_idx, (audio, label) in enumerate(zip(audios, labels)):
         if label != minority_class:
             continue
         for _ in range(n_augments):
             augmented = augmenter(samples=audio.astype(np.float32), sample_rate=sr)
             audios_out.append(augmented)
             labels_out.append(label)
+            parent_indices.append(orig_idx)
             n_generated += 1
 
     new_counts = Counter(labels_out)
@@ -117,4 +121,4 @@ def augment_minority(
         n_generated,
     )
 
-    return audios_out, labels_out
+    return audios_out, labels_out, parent_indices

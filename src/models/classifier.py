@@ -139,9 +139,15 @@ def train_and_evaluate(
     n_folds: int = N_FOLDS,
     n_repeats: int = CV_REPEATS,
     labels: list | None = None,
+    groups: np.ndarray | None = None,
 ) -> dict[str, Any]:
     """
     Run Repeated Stratified K-Fold CV on a single pipeline.
+
+    If ``groups`` is provided, the split is performed on unique groups only
+    (original samples).  Augmented copies (sharing the same group as their
+    parent) are added to the training fold but *never* to the validation fold.
+    This prevents augmentation-induced data leakage.
 
     Returns a dict with per-fold and aggregated metrics.
     """
@@ -154,44 +160,45 @@ def train_and_evaluate(
     fold_metrics = []
     fold_thresholds = []
 
-    for fold_idx, (train_idx, val_idx) in enumerate(rskf.split(X, y)):
-        X_train, X_val = X[train_idx], X[val_idx]
-        y_train, y_val = y[train_idx], y[val_idx]
+    if groups is not None:
+        # Build mapping: group_id → list of sample indices
+        unique_groups = np.unique(groups)
+        group_to_indices = {g: np.where(groups == g)[0] for g in unique_groups}
 
-        pipeline_clone = _clone_pipeline(pipeline)
-        pipeline_clone.fit(X_train, y_train)
+        # For splitting, pick one representative sample per group (the first one)
+        rep_indices = np.array([group_to_indices[g][0] for g in unique_groups])
+        X_rep = X[rep_indices]
+        y_rep = y[rep_indices]
 
-        y_pred = pipeline_clone.predict(X_val)
-        y_proba = None
+        for fold_idx, (train_grp_idx, val_grp_idx) in enumerate(rskf.split(X_rep, y_rep)):
+            train_groups = unique_groups[train_grp_idx]
+            val_groups = unique_groups[val_grp_idx]
 
-        if hasattr(pipeline_clone, "predict_proba"):
-            try:
-                y_proba = pipeline_clone.predict_proba(X_val)
-            except Exception:
-                pass
+            # Training: include ALL samples (original + augmented) for training groups
+            train_idx = np.concatenate([group_to_indices[g] for g in train_groups])
+            # Validation: include ONLY the original sample for validation groups
+            val_idx = np.array([group_to_indices[g][0] for g in val_groups])
 
-        # Threshold optimisation on validation fold
-        if y_proba is not None and y_proba.ndim == 2 and y_proba.shape[1] == 2:
-            best_thresh = optimize_threshold(y_val, y_proba[:, 1])
-            y_pred_opt = (y_proba[:, 1] >= best_thresh).astype(int)
-            fold_thresholds.append(best_thresh)
-        else:
-            y_pred_opt = y_pred
-            fold_thresholds.append(0.5)
+            X_train, X_val = X[train_idx], X[val_idx]
+            y_train, y_val = y[train_idx], y[val_idx]
 
-        m = compute_metrics(y_val, y_pred_opt, y_proba, labels=labels)
-        m["fold"] = fold_idx
-        m["threshold"] = fold_thresholds[-1]
-        fold_metrics.append(m)
+            fold_metrics_entry = _run_single_fold(
+                pipeline, X_train, y_train, X_val, y_val,
+                pipeline_name, fold_idx, labels,
+            )
+            fold_thresholds.append(fold_metrics_entry["threshold"])
+            fold_metrics.append(fold_metrics_entry)
+    else:
+        for fold_idx, (train_idx, val_idx) in enumerate(rskf.split(X, y)):
+            X_train, X_val = X[train_idx], X[val_idx]
+            y_train, y_val = y[train_idx], y[val_idx]
 
-        logger.info(
-            "%s | Fold %2d | balanced_acc=%.3f  f1_macro=%.3f  thresh=%.3f",
-            pipeline_name or "Pipeline",
-            fold_idx,
-            m["balanced_accuracy"],
-            m["f1_macro"],
-            fold_thresholds[-1],
-        )
+            fold_metrics_entry = _run_single_fold(
+                pipeline, X_train, y_train, X_val, y_val,
+                pipeline_name, fold_idx, labels,
+            )
+            fold_thresholds.append(fold_metrics_entry["threshold"])
+            fold_metrics.append(fold_metrics_entry)
 
     # ── aggregate ─────────────────────────────────────────────────────────────
     scalar_keys = [
@@ -216,6 +223,50 @@ def train_and_evaluate(
     agg["pipeline_name"]  = pipeline_name
 
     return {"per_fold": fold_metrics, "aggregate": agg}
+
+
+def _run_single_fold(
+    pipeline: Pipeline,
+    X_train: np.ndarray, y_train: np.ndarray,
+    X_val: np.ndarray, y_val: np.ndarray,
+    pipeline_name: str, fold_idx: int,
+    labels: list | None,
+) -> dict:
+    """Train on one fold and return metrics dict."""
+    from src.utils.metrics import compute_metrics
+
+    pipeline_clone = _clone_pipeline(pipeline)
+    pipeline_clone.fit(X_train, y_train)
+
+    y_pred = pipeline_clone.predict(X_val)
+    y_proba = None
+
+    if hasattr(pipeline_clone, "predict_proba"):
+        try:
+            y_proba = pipeline_clone.predict_proba(X_val)
+        except Exception:
+            pass
+
+    if y_proba is not None and y_proba.ndim == 2 and y_proba.shape[1] == 2:
+        best_thresh = optimize_threshold(y_val, y_proba[:, 1])
+        y_pred_opt = (y_proba[:, 1] >= best_thresh).astype(int)
+    else:
+        y_pred_opt = y_pred
+        best_thresh = 0.5
+
+    m = compute_metrics(y_val, y_pred_opt, y_proba, labels=labels)
+    m["fold"] = fold_idx
+    m["threshold"] = best_thresh
+
+    logger.info(
+        "%s | Fold %2d | balanced_acc=%.3f  f1_macro=%.3f  thresh=%.3f",
+        pipeline_name or "Pipeline",
+        fold_idx,
+        m["balanced_accuracy"],
+        m["f1_macro"],
+        best_thresh,
+    )
+    return m
 
 
 def _clone_pipeline(pipeline: Pipeline) -> Pipeline:
