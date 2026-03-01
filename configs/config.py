@@ -17,9 +17,9 @@ MIN_BUCKET_RATIO   = 0.5        # keep final segment if >= 50 % of a full bucket
 RANDOM_SEED        = 42
 N_FOLDS            = 5          # stratified CV folds
 CV_REPEATS         = 3          # repeated stratified CV for stability
-FEATURE_SELECT_K   = 60         # top-K dims after MI SelectKBest (Track A)
+FEATURE_SELECT_K   = 100        # top-K dims after MI SelectKBest (Track A)
 PCA_COMPONENTS     = 50         # PCA components for embedding track (Track B)
-MAX_FEATURES       = 60         # alias for FEATURE_SELECT_K (backward compat)
+MAX_FEATURES       = 100        # alias for FEATURE_SELECT_K (backward compat)
 PCA_VARIANCE       = 0.95       # retain 95% variance (auto-selects n_components)
 
 # ── pooling ──────────────────────────────────────────────────────────────────────────
@@ -42,7 +42,7 @@ TRACK_A_PARAMS = {
     "max_depth": 4,
     "learning_rate": 0.05,
     "min_child_samples": 5,
-    "scale_pos_weight": 2.6,     # 110 Native / 43 Non-Native ≈ 2.56
+    "class_weight": "balanced",   # auto-weights inversely proportional to class freq
     "random_state": RANDOM_SEED,
     "verbosity": -1,
     "n_jobs": -1,
