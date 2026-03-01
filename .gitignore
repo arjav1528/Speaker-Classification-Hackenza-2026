@@ -1,26 +1,50 @@
-# Python-generated files
+# ── Python ─────────────────────────────────────────────────
 __pycache__/
 *.py[oc]
+*.egg-info/
 build/
 dist/
 wheels/
-*.egg-info
 
-# Virtual environments
-.venv
+# ── Virtual environment ───────────────────────────────────
+.venv/
+venv/
 
-# macOS
+# ── macOS ─────────────────────────────────────────────────
 .DS_Store
 
-# IDE / editor
+# ── IDE / editor ──────────────────────────────────────────
 .vscode/
 .idea/
-
-# Competitive programming helper
 .cph/
+*.swp
+*~
 
-# Trained models (large binary files)
+# ── Project artifacts ──────────────────────────────────────
+.feature_cache/
+outputs/models/*.joblib
+outputs/models/*.pkl
+outputs/results/*.csv
+outputs/results/*.json
+outputs/results/*.png
+
+# ── Old flat-layout artifacts ──────────────────────────────
 models/*.joblib
 models/*.npz
+results/
 
+# ── Data (large files) ────────────────────────────────────
+share-data/data/wav/
+share-data/data/raw/
+share-data/test/wav/
+share-data/test/raw/
 share-audio/
+*.wav
+*.mp3
+*.flac
+*.ogg
+*.oga
+*.m4a
+
+# ── Misc ───────────────────────────────────────────────────
+*.log

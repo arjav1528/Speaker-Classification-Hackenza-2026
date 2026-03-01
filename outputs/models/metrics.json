@@ -1,0 +1,84 @@
+{
+  "best_individual_model": "gbm",
+  "best_individual_cv_accuracy": 0.7647,
+  "ensemble_cv_accuracy": 0.7647,
+  "n_samples": 153,
+  "n_input_features": 218,
+  "n_selected_features": 80,
+  "classes": [
+    "Native",
+    "Non-Native"
+  ],
+  "all_metrics": {
+    "svm": {
+      "accuracy": 0.7255,
+      "grid_best_score": 0.726,
+      "best_params": {
+        "clf__C": "1.0",
+        "clf__gamma": "scale",
+        "clf__kernel": "rbf"
+      },
+      "confusion_matrix": [
+        [
+          95,
+          15
+        ],
+        [
+          27,
+          16
+        ]
+      ]
+    },
+    "rf": {
+      "accuracy": 0.719,
+      "grid_best_score": 0.7191,
+      "best_params": {
+        "clf__max_depth": "None",
+        "clf__n_estimators": "200"
+      },
+      "confusion_matrix": [
+        [
+          106,
+          4
+        ],
+        [
+          39,
+          4
+        ]
+      ]
+    },
+    "gbm": {
+      "accuracy": 0.7647,
+      "grid_best_score": 0.7647,
+      "best_params": {
+        "clf__learning_rate": "0.1",
+        "clf__max_depth": "3",
+        "clf__n_estimators": "50",
+        "clf__subsample": "1.0"
+      },
+      "confusion_matrix": [
+        [
+          102,
+          8
+        ],
+        [
+          28,
+          15
+        ]
+      ]
+    },
+    "ensemble": {
+      "accuracy": 0.7647,
+      "confusion_matrix": [
+        [
+          106,
+          4
+        ],
+        [
+          32,
+          11
+        ]
+      ]
+    }
+  }
+}
